@@ -39,15 +39,39 @@ macOS 上的软件安装 / 卸载 / 残留清理工具。原生 SwiftUI 图形�
 | 本地文件只进废纸篓 | 用户文档永远不会被彻底删除 |
 | 残留默认进废纸篓 | 彻底删除需二次勾选；超过 500 MB 的项单独高亮警告 |
 
-## 安装
+## 下载
+
+从 Releases 直接下载 dmg，不需要 clone：
+
+| 版本 | 下载 | 说明 |
+| --- | --- | --- |
+| **v1.3** | [`MacAppManager-1.3.dmg`](https://github.com/jtnetcc/mac-software-manager/releases/download/v1.3/MacAppManager-1.3.dmg) | **推荐**。修复残留扫描误判 |
+| v1.2 | [`MacAppManager-1.2.dmg`](https://github.com/jtnetcc/mac-software-manager/releases/download/v1.2/MacAppManager-1.2.dmg) | ⚠️ 归档，含数据丢失缺陷，勿用 |
+| v1.1 | [`MacAppManager-1.1.dmg`](https://github.com/jtnetcc/mac-software-manager/releases/download/v1.1/MacAppManager-1.1.dmg) | ⚠️ 归档，含数据丢失缺陷，勿用 |
+
+全部版本：<https://github.com/jtnetcc/mac-software-manager/releases>
+
+> v1.1 / v1.2 的残留扫描会误判已安装应用为「未安装」，把它的数据当孤儿目录删掉——v1.2 曾因此删掉 12 GB 微信本地数据。仅作版本归档，已标记为 pre-release。
+
+**校验**（下载后可选）：
 
 ```sh
-open "macapp-gui/dist/Mac软件管家-1.3.dmg"
+shasum -a 256 ~/Downloads/MacAppManager-1.3.dmg
+# 22b915a69e340c05a41f3a0580745d2b8b8eeb4245705a7ca85ff343b88c27ee
 ```
 
-把 `Mac软件管家` 拖进「应用程序」文件夹即可。已做 ad-hoc 签名，本机双击就能用。
+## 安装
 
-> 首次打开如果提示「无法验证开发者」，右键点击图标选「打开」。本应用没有经过苹果公证。
+把 dmg 里的 `Mac软件管家` 拖进「应用程序」文件夹即可。已做 ad-hoc 签名，本机双击就能用。
+
+```sh
+open ~/Downloads/MacAppManager-1.3.dmg
+```
+
+> 首次打开如果提示「无法验证开发者」，右键点击图标选「打开」，或者执行
+> `xattr -dr com.apple.quarantine /Applications/Mac软件管家.app`。本应用没有经过苹果公证。
+>
+> 也不要直接从 dmg 里双击运行——App Translocation 会把它挂到随机只读路径，磁盘访问授权留不住。先拖进「应用程序」。
 
 ## 从源码构建
 
