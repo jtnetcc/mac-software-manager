@@ -24,10 +24,18 @@ enum Snapshot {
         store.refresh()
         waitUntil { !store.isBusy && !store.apps.isEmpty }
 
-        if mode == "orphan" || mode == "orphan-all" {
+        if mode == "recommend-demo" {
+            // 用合成数据检查推荐行排版：真机上未必有值得推荐的应用
+            store.apps = demoApps()
+            store.switchMode(.recommend)
+            waitUntil { !store.isBusy && !store.apps.isEmpty }
+        } else if mode == "orphan" || mode == "orphan-all" {
             store.switchMode(.orphans)
             if mode == "orphan-all" { store.setIncludeMediumOrphans(true) }
             waitUntil { store.orphanScanned && !store.isScanningOrphans }
+        } else if mode == "recommend" {
+            store.switchMode(.recommend)
+            waitUntil { !store.isBusy && !store.apps.isEmpty }
         } else if let appName,
                   let match = store.apps.first(where: { $0.name.contains(appName) }) {
             store.select(match.id)
@@ -209,6 +217,31 @@ enum Snapshot {
             print("snapshot(sheet): \(path) \(rep.pixelsWide)x\(rep.pixelsHigh)")
         }
         RunLoop.main.run(until: Date().addingTimeInterval(2))
+    }
+
+    /// 合成一批「该被推荐」的应用，只为检查推荐行排版。图标用真机上的真实 .app，看起来才像回事。
+    private static func demoApps() -> [AppInfo] {
+        let now = Date()
+        let seeds: [(String, String, String, Int64, Int64, Int64, Int)] = [
+            ("Doubao", "com.demo.doubao", "/Applications/Doubao.app",
+             1_200_000_000, 1_500_000_000, 1_400_000_000, 420),
+            ("抖音", "com.bytedance.douyin.desktop", "/Applications/抖音.app",
+             787_000_000, 1_600_000_000, 240_000_000, 200),
+            ("Telegram", "ru.keepcoder.Telegram", "/Applications/Telegram.app",
+             320_000_000, 12_000_000, 780_000_000, 95),
+            ("Lark", "com.larksuite.suite", "/Applications/Lark.app",
+             1_600_000_000, 1_000_000, 0, 5)
+        ]
+        return seeds.map { seed in
+            var app = AppInfo(path: seed.2, name: seed.0, bundleID: seed.1, version: "1.0")
+            app.size = seed.3
+            app.dataSize = seed.4
+            app.cacheSize = seed.5
+            app.lastUsed = Calendar.current.date(byAdding: .day, value: -seed.6, to: now)
+            app.usageSource = .spotlight
+            app.isSystem = false
+            return app
+        }
     }
 
     private static func waitUntil(timeout: Double = 25, _ condition: () -> Bool) {        let deadline = Date().addingTimeInterval(timeout)

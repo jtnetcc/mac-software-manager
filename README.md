@@ -25,7 +25,25 @@ macOS 上的软件安装 / 卸载 / 残留清理工具。原生 SwiftUI 图形�
 
 **残留扫描**：不管应用什么时候删的、用什么删的，只要数据还在、应用已经不在，就能一次扫出来清掉。判定原则是「宁可漏报，不可错杀」。
 
+**推荐卸载**：按「多久没用」「缓存大小」「本体体积」「数据是否远大于本体」打分，分成推荐卸载 / 可以考虑 / 不建议三档。系统软件直接排除，最近 30 天用过的也不推荐。**推荐只是建议，永远不会自动勾选。**
+
+**占用分析**：侧边栏按「自己装的 / 系统软件」分组，系统软件默认折叠。每个应用显示体积、最后使用时间、占全部应用总占用的百分比和占比条；详情页拆成「本体 / 数据 / 缓存」三块。
+
 **还原**：走「移入废纸篓」的卸载都有记录，可以一键搬回原位置。
+
+## 关于「最后使用时间」
+
+macOS **没有**公开的「应用上次启动时间」接口。实测全盘 338 个 `.app`，Spotlight 的 `kMDItemLastUsedDate` 只覆盖 28 个（8%），Safari、Music 这些系统应用全是 `null`——它们不走 LaunchServices 常规启动。
+
+所以这个值是三路拼出来的，界面上每一项都标了来源：
+
+| 来源 | 依据 | 精度 |
+| --- | --- | --- |
+| 系统记录 | Spotlight `kMDItemLastUsedDate` | 精确到秒，覆盖约 8% |
+| 数据活跃 | 应用数据目录（容器 / 缓存 / 偏好设置 / 保存状态）的最新修改时间 | 精确到天，覆盖约一半 |
+| 仅安装时间 | 应用本体的修改时间 | 只说明安装/更新时间，**不参与推荐判断** |
+
+标记为「仅安装时间」的应用，推荐引擎不会拿它当「多久没用」的证据。
 
 ## 安全设计
 
@@ -45,7 +63,8 @@ macOS 上的软件安装 / 卸载 / 残留清理工具。原生 SwiftUI 图形�
 
 | 版本 | 下载 | 说明 |
 | --- | --- | --- |
-| **v1.3** | [`MacAppManager-1.3.dmg`](https://github.com/jtnetcc/mac-software-manager/releases/download/v1.3/MacAppManager-1.3.dmg) | **推荐**。修复残留扫描误判 |
+| **v1.4** | [`MacAppManager-1.4.dmg`](https://github.com/jtnetcc/mac-software-manager/releases/download/v1.4/MacAppManager-1.4.dmg) | **推荐**。新增使用时间 / 推荐卸载 / 缓存分析 / 占用占比 |
+| v1.3 | [`MacAppManager-1.3.dmg`](https://github.com/jtnetcc/mac-software-manager/releases/download/v1.3/MacAppManager-1.3.dmg) | 修复残留扫描误判 |
 | v1.2 | [`MacAppManager-1.2.dmg`](https://github.com/jtnetcc/mac-software-manager/releases/download/v1.2/MacAppManager-1.2.dmg) | ⚠️ 归档，含数据丢失缺陷，勿用 |
 | v1.1 | [`MacAppManager-1.1.dmg`](https://github.com/jtnetcc/mac-software-manager/releases/download/v1.1/MacAppManager-1.1.dmg) | ⚠️ 归档，含数据丢失缺陷，勿用 |
 
@@ -56,8 +75,8 @@ macOS 上的软件安装 / 卸载 / 残留清理工具。原生 SwiftUI 图形�
 **校验**（下载后可选）：
 
 ```sh
-shasum -a 256 ~/Downloads/MacAppManager-1.3.dmg
-# 22b915a69e340c05a41f3a0580745d2b8b8eeb4245705a7ca85ff343b88c27ee
+shasum -a 256 ~/Downloads/MacAppManager-1.4.dmg
+# 9fb1712dba341062062797be6611c432126372b5c3367387ce1cdd47777e9969
 ```
 
 ## 安装
@@ -65,7 +84,7 @@ shasum -a 256 ~/Downloads/MacAppManager-1.3.dmg
 把 dmg 里的 `Mac软件管家` 拖进「应用程序」文件夹即可。已做 ad-hoc 签名，本机双击就能用。
 
 ```sh
-open ~/Downloads/MacAppManager-1.3.dmg
+open ~/Downloads/MacAppManager-1.4.dmg
 ```
 
 > 首次打开如果提示「无法验证开发者」，右键点击图标选「打开」，或者执行
@@ -78,7 +97,7 @@ open ~/Downloads/MacAppManager-1.3.dmg
 ```sh
 cd macapp-gui
 ./build.sh      # 输出 dist/Mac软件管家.app
-./package.sh    # 输出 dist/Mac软件管家-1.3.dmg
+./package.sh    # 输出 dist/Mac软件管家-1.4.dmg
 ```
 
 需要 macOS 14+ 与命令行工具。注意 **macOS 27 SDK 里的 SwiftUI 把 `@State` 等属性包装器改成了宏**，而命令行工具不附带 `SwiftUIMacros` 插件，直接编译会报 `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found`，所以 `build.sh` 固定使用 `MacOSX26.5.sdk`。
@@ -99,12 +118,22 @@ cd macapp
 python3 macapp/selftest.py
 ```
 
-图形版覆盖 117 项：路径安全、通配符匹配、应用发现、扫描结果合法性、废纸篓往返、彻底删除、残留判定、本地文件校验、权限探测。
+图形版覆盖 344 项：路径安全、通配符匹配、应用发现、扫描结果合法性、废纸篓往返、彻底删除、残留判定、本地文件校验、权限探测、推荐引擎、占比计算、系统软件识别、应用画像。
+
+调试入口：
+
+```sh
+MacApp --recommend          # 打印每个应用的画像与推荐分数
+MacApp --orphans all        # 打印全部残留扫描结果
+MacApp --selftest           # 跑自检
+```
 
 ## 已知限制
 
 - 只构建了 arm64，Intel Mac 需要改 `build.sh` 里的 target
 - 「残留」终究是猜的。Spotlight 没索引到的应用仍可能被误判，所以清理默认走废纸篓，别跳过
+- 「最后使用时间」是拼出来的，不是系统记录。标着「仅安装时间」的那批应用，其实不知道你到底用没用过
+- 缓存只统计 `~/Library/Caches` 与 Group Containers 里的 Caches。应用自己放在 `Application Support` 里的数据算进「数据」，不算「缓存」
 - ad-hoc 签名，每次重新构建签名都会变，旧的 TCC 授权可能失效
 - 本地文件只按名字匹配，中英文名对不上时会漏
 

@@ -4,6 +4,7 @@ import SwiftUI
 
 enum ViewMode: String, Hashable {
     case apps
+    case recommend
     case orphans
 }
 
@@ -95,6 +96,8 @@ final class Store: ObservableObject {
 
     /// 防止旧的一次扫描结果覆盖新结果
     private var orphanScanToken = 0
+    /// 同上，应用列表也有两阶段刷新
+    private var scanToken = 0
 
     var filteredApps: [AppInfo] {
         guard !searchText.isEmpty else { return apps }
@@ -104,24 +107,95 @@ final class Store: ObservableObject {
         }
     }
 
+    /// 侧边栏分组：自己装的在前，系统自带的在后
+    var userApps: [AppInfo] { filteredApps.filter { !$0.isSystem } }
+    var systemApps: [AppInfo] { filteredApps.filter { $0.isSystem } }
+
+    var userTotalSize: Int64 { userApps.reduce(0) { $0 + $1.footprint } }
+    var systemTotalSize: Int64 { systemApps.reduce(0) { $0 + $1.footprint } }
+    /// 所有应用的占用总和，占比的分母
+    var totalFootprint: Int64 { apps.reduce(0) { $0 + $1.footprint } }
+
+    var diskCapacity: Int64 { Scanner.diskInfo().capacity }
+    var diskFree: Int64 { Scanner.diskInfo().free }
+
+    var recommendationContext: RecommendationEngine.Context {
+        RecommendationEngine.Context(
+            totalFootprint: totalFootprint,
+            diskCapacity: diskCapacity,
+            diskFree: diskFree
+        )
+    }
+
+    func recommendation(for app: AppInfo) -> Recommendation {
+        RecommendationEngine.evaluate(app, context: recommendationContext)
+    }
+
+    /// 推荐清单，按分数从高到低
+    var recommendedApps: [(app: AppInfo, rec: Recommendation)] {
+        let context = recommendationContext
+        return apps
+            .compactMap { app -> (app: AppInfo, rec: Recommendation)? in
+                let rec = RecommendationEngine.evaluate(app, context: context)
+                return rec.isRecommendation ? (app, rec) : nil
+            }
+            .sorted {
+                if $0.rec.score != $1.rec.score { return $0.rec.score > $1.rec.score }
+                return $0.app.footprint > $1.app.footprint
+            }
+    }
+
+    var recommendedBytes: Int64 { recommendedApps.reduce(0) { $0 + $1.app.footprint } }
+    var recommendedCacheBytes: Int64 { recommendedApps.reduce(0) { $0 + $1.app.cacheSize } }
+
     var selectedApp: AppInfo? { apps.first { $0.id == selectedID } }
 
     // MARK: - 应用列表
 
+    /// 分两阶段：先出体积让界面立刻可用，再在后台补最后使用时间、缓存、系统判定。
+    /// 一次性做完要 4~6 秒，期间界面是空的，体验很差。
     func refresh() {
+        scanToken += 1
         isBusy = true
         status = "正在扫描已安装应用…"
+        let token = scanToken
         DispatchQueue.global(qos: .userInitiated).async {
             var list = Scanner.discoverApps()
             for index in list.indices {
                 list[index].size = Scanner.size(of: list[index].path)
             }
+            let firstPass = list
+
             DispatchQueue.main.async {
-                self.apps = list
-                self.isBusy = false
-                self.status = "共 \(list.count) 个应用"
+                guard token == self.scanToken else { return }
+                self.apps = firstPass
                 self.permission = Safety.permissionState()
-                if let id = self.selectedID, !list.contains(where: { $0.id == id }) {
+                self.status = "正在分析使用记录 0/\(firstPass.count)…"
+            }
+
+            var enriched = firstPass
+            for index in enriched.indices {
+                Scanner.enrich(&enriched[index])
+                // 每 25 个推一次进度，既能看到进展又不至于刷爆主线程
+                if index % 25 == 24 {
+                    let partial = enriched
+                    let done = index + 1
+                    DispatchQueue.main.async {
+                        guard token == self.scanToken else { return }
+                        self.apps = partial
+                        self.status = "正在分析使用记录 \(done)/\(partial.count)…"
+                    }
+                }
+            }
+            let final = enriched
+
+            DispatchQueue.main.async {
+                guard token == self.scanToken else { return }
+                self.apps = final
+                self.isBusy = false
+                self.status = "共 \(final.count) 个应用"
+                self.permission = Safety.permissionState()
+                if let id = self.selectedID, !final.contains(where: { $0.id == id }) {
                     self.selectedID = nil
                     self.plan = nil
                 }
@@ -238,6 +312,16 @@ final class Store: ObservableObject {
         if mode == .orphans && !orphanScanned && !isScanningOrphans {
             scanOrphans()
         }
+        // 推荐依赖使用时间与缓存，如果还没扫过画像就先补一次
+        if mode == .recommend && apps.isEmpty && !isBusy {
+            refresh()
+        }
+    }
+
+    /// 从推荐页跳到某个应用的卸载清单
+    func inspectFromRecommend(_ app: AppInfo) {
+        mode = .apps
+        select(app.id)
     }
 
     func scanOrphans() {

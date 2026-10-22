@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 struct RuleTemplate: Codable {
     let path: String
@@ -31,7 +32,9 @@ struct Rules: Codable {
 
 enum Scanner {
     static let home = FileManager.default.homeDirectoryForCurrentUser.path
-    static let appRoots = ["/Applications", "\(home)/Applications"]
+    /// `/System/Applications` 也要扫：不带它的话「系统软件占了多少」这个数就是假的，
+    /// 而 Notes、Music、Maps 这些 60 多个应用全在那里。它们会在界面上单独分组并禁用卸载。
+    static let appRoots = ["/Applications", "\(home)/Applications", "/System/Applications"]
 
     // MARK: - 规则加载
 
@@ -135,8 +138,17 @@ enum Scanner {
         return total
     }
 
-    // MARK: - 全盘应用索引
+    /// 磁盘总容量与可用空间，用于算「这个应用占硬盘多少」
+    static func diskInfo() -> (capacity: Int64, free: Int64) {
+        let url = URL(fileURLWithPath: "/")
+        guard let values = try? url.resourceValues(forKeys: [
+            .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey
+        ]) else { return (0, 0) }
+        return (Int64(values.volumeTotalCapacity ?? 0),
+                values.volumeAvailableCapacityForImportantUsage ?? 0)
+    }
 
+    // MARK: - 全盘应用索引
     /// 已安装应用索引：bundle id 集合 + 名称集合。
     ///
     /// **必须用 Spotlight 全盘找，不能只看 /Applications。**
@@ -193,6 +205,201 @@ enum Scanner {
         }
 
         return (bundleIDs, names)
+    }
+
+    // MARK: - 应用画像（最后使用 / 数据 / 缓存 / 系统判定）
+
+    /// 一次补齐所有派生字段。四个功能（最后使用时间、缓存、占比、推荐）共用这一遍扫描，
+    /// 不再为每个功能单独遍历目录。
+    static func enrich(_ app: inout AppInfo) {
+        // 调用方可能只拿 discoverApps() 的结果，本体体积还没算
+        if app.size == 0 { app.size = size(of: app.path) }
+        let (used, source) = lastUsed(for: app)
+        app.lastUsed = used
+        app.usageSource = source
+        app.cacheSize = cacheSize(for: app)
+        app.dataSize = dataSize(for: app)
+        let signed = appleSigned(app.path)
+        app.isAppleSigned = signed
+        app.isSystem = isSystemApp(path: app.path, bundleID: app.bundleID, appleSigned: signed)
+    }
+
+    /// 最后使用时间，三路兜底取最早可信的那个。
+    ///
+    /// macOS 没有「应用上次启动时间」的公开 API。实测全盘 338 个 .app 里，
+    /// Spotlight 的 `kMDItemLastUsedDate` 只覆盖 28 个（8%），Safari、Music 这些
+    /// 系统应用全是 null——它们不走 LaunchServices 常规启动。所以必须有兜底：
+    ///
+    /// 1. Spotlight 记录（精确到秒，最可信，但覆盖低）
+    /// 2. 应用数据目录的最新修改时间（应用一跑就写缓存/偏好设置，覆盖约一半）
+    /// 3. 应用本体修改时间（只说明安装/更新时间，标成不可信）
+    static func lastUsed(for app: AppInfo) -> (Date?, UsageSource) {
+        if let date = spotlightLastUsed(app.path) {
+            return (date, .spotlight)
+        }
+        if let date = dataActivity(app) {
+            return (date, .activity)
+        }
+        if let date = modificationDate(app.path) {
+            return (date, .install)
+        }
+        return (nil, .unknown)
+    }
+
+    static func spotlightLastUsed(_ path: String) -> Date? {
+        guard let item = NSMetadataItem(url: URL(fileURLWithPath: path)) else { return nil }
+        return item.value(forAttribute: "kMDItemLastUsedDate") as? Date
+    }
+
+    /// 应用一运行就会写容器、缓存、偏好设置。取这些位置里最新的修改时间当「最后活动时间」。
+    ///
+    /// 只看到目录本身和它的第一层子项——再往深走要递归，338 个应用会拖到好几秒，
+    /// 而精度对「多久没用」这个判断没有意义。所以这个值在界面上标「数据活跃」，不冒充系统记录。
+    static func dataActivity(_ app: AppInfo) -> Date? {
+        var newest: Date?
+        for path in activityPaths(app) {
+            guard let date = latestActivity(path) else { continue }
+            if newest == nil || date > newest! { newest = date }
+        }
+        return newest
+    }
+
+    static func activityPaths(_ app: AppInfo) -> [String] {
+        var paths: [String] = []
+        if !app.bundleID.isEmpty {
+            paths += [
+                "\(home)/Library/Containers/\(app.bundleID)",
+                "\(home)/Library/Caches/\(app.bundleID)",
+                "\(home)/Library/Application Support/\(app.bundleID)",
+                "\(home)/Library/Preferences/\(app.bundleID).plist",
+                "\(home)/Library/Saved Application State/\(app.bundleID).savedState",
+                "\(home)/Library/HTTPStorages/\(app.bundleID)",
+                "\(home)/Library/WebKit/\(app.bundleID)"
+            ]
+        }
+        for name in Set([app.name, executableName(app.path)]) where !name.isEmpty {
+            paths += [
+                "\(home)/Library/Application Support/\(name)",
+                "\(home)/Library/Caches/\(name)",
+                "\(home)/Library/Preferences/\(name).plist"
+            ]
+        }
+        return paths
+    }
+
+    /// 目录本身的 mtime + 第一层子项的 mtime，取最大
+    static func latestActivity(_ path: String) -> Date? {
+        var newest = modificationDate(path)
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: path) else {
+            return newest
+        }
+        for entry in entries.prefix(200) {
+            guard let date = modificationDate(path + "/" + entry) else { continue }
+            if newest == nil || date > newest! { newest = date }
+        }
+        return newest
+    }
+
+    static func modificationDate(_ path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+    }
+
+    /// 可清理的缓存：独立的 `~/Library/Caches/<bundle id>`，以及 Group Containers 里的缓存。
+    /// 沙盒容器内部的 `Data/Library/Caches` 算进 dataSize，这里不重复计。
+    static func cacheSize(for app: AppInfo) -> Int64 {
+        var paths: [String] = []
+        if !app.bundleID.isEmpty {
+            paths.append("\(home)/Library/Caches/\(app.bundleID)")
+        }
+        for name in Set([app.name, executableName(app.path)]) where !name.isEmpty {
+            paths.append("\(home)/Library/Caches/\(name)")
+        }
+        paths += groupContainerCaches(app)
+        return dedupedSize(paths)
+    }
+
+    /// 应用数据：沙盒容器、Application Support、偏好设置、保存状态、WebKit 存储
+    static func dataSize(for app: AppInfo) -> Int64 {
+        var paths: [String] = []
+        if !app.bundleID.isEmpty {
+            paths += [
+                "\(home)/Library/Containers/\(app.bundleID)",
+                "\(home)/Library/Application Support/\(app.bundleID)",
+                "\(home)/Library/Saved Application State/\(app.bundleID).savedState",
+                "\(home)/Library/HTTPStorages/\(app.bundleID)",
+                "\(home)/Library/WebKit/\(app.bundleID)",
+                "\(home)/Library/Preferences/\(app.bundleID).plist"
+            ]
+        }
+        for name in Set([app.name, executableName(app.path)]) where !name.isEmpty {
+            paths += [
+                "\(home)/Library/Application Support/\(name)",
+                "\(home)/Library/Preferences/\(name).plist"
+            ]
+        }
+        return dedupedSize(paths)
+    }
+
+    /// 同一个路径可能被 bundle id 和名字同时命中，符号链接也可能指到同一处
+    static func dedupedSize(_ paths: [String]) -> Int64 {
+        var seen = Set<String>()
+        var total: Int64 = 0
+        for path in paths {
+            let key = (path as NSString).resolvingSymlinksInPath
+            guard seen.insert(key).inserted else { continue }
+            total += size(of: path)
+        }
+        return total
+    }
+
+    static func groupContainerCaches(_ app: AppInfo) -> [String] {
+        let root = "\(home)/Library/Group Containers"
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: root) else { return [] }
+        let bid = app.bundleID.lowercased()
+        guard !bid.isEmpty else { return [] }
+        var hits: [String] = []
+        for entry in entries {
+            // 目录名是 `<10 位团队 ID>.<bundle id>` 或 `group.<bundle id>`
+            let low = entry.lowercased()
+            let bare = OrphanScanner.stripContainerPrefix(entry).lowercased()
+            guard low == bid || bare == bid || low.hasSuffix("." + bid) else { continue }
+            let cache = root + "/" + entry + "/Library/Caches"
+            if FileManager.default.fileExists(atPath: cache) { hits.append(cache) }
+        }
+        return hits
+    }
+
+    // MARK: - 系统软件识别
+
+    /// 系统软件判定。三个信号取并集：
+    /// 1. 解析符号链接后落在 `/System` 或 `/Library/Apple`——`/Applications/Safari.app`
+    ///    其实是指向 `/System/Cryptexes/.../Safari.app` 的链接，只看路径前缀会漏
+    /// 2. bundle id 以 `com.apple.` 开头
+    /// 3. Apple 平台签名（`macOS Software Signing` 证书）
+    static func isSystemApp(path: String, bundleID: String, appleSigned: Bool) -> Bool {
+        let resolved = (path as NSString).resolvingSymlinksInPath
+        if resolved.hasPrefix("/System/") { return true }
+        if resolved.hasPrefix("/Library/Apple/") { return true }
+        if bundleID.hasPrefix("com.apple.") { return true }
+        return appleSigned
+    }
+
+    /// 是否 Apple 平台签名。
+    ///
+    /// 不用 `codesign` 子进程——338 个应用要 7.4 秒。进程内 `SecStaticCode` 只要 1.1 秒，
+    /// 而且能直接拿到叶子证书的 subject：Apple 平台组件是 `macOS Software Signing`，
+    /// 第三方是 `Developer ID Application: <公司> (<团队 ID>)`。
+    static func appleSigned(_ path: String) -> Bool {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess,
+              let code else { return false }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any],
+              let certs = dict[kSecCodeInfoCertificates as String] as? [SecCertificate],
+              let leaf = certs.first else { return false }
+        let subject = SecCertificateCopySubjectSummary(leaf) as String? ?? ""
+        return subject.contains("Software Signing")
     }
 
     // MARK: - 残留扫描

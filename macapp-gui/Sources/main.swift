@@ -20,6 +20,10 @@ struct MacAppMain: App {
             SelfTest.dumpOrphans(includeMedium: all)
             exit(0)
         }
+        if CommandLine.arguments.contains("--recommend") {
+            SelfTest.dumpRecommend()
+            exit(0)
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--snapshot-orphan-sheet"),
            CommandLine.arguments.count > index + 1 {
             let path = CommandLine.arguments[index + 1]

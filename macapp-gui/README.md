@@ -74,6 +74,71 @@ open "dist/Mac软件管家-1.3.dmg"
 
 ![残留扫描](docs/orphan.png)
 
+## 推荐卸载与占用分析（v1.4）
+
+顶部切到「推荐」→ 按分数排序的清单，每条写明理由。
+
+![推荐卸载](docs/recommend.png)
+
+上图是「没有值得卸载的应用」时的样子：页面回退成占用排行，不至于是个空页。这台机器上 80 个应用最近都在用、缓存也不大，所以一条推荐都没有——这本身就是正确结果。
+
+**打分规则**（纯函数 `RecommendationEngine.evaluate`，不碰磁盘，自检里逐个用例验证）：
+
+| 维度 | 加分 |
+| --- | --- |
+| 超过一年没打开 | +45 |
+| 半年多没打开 | +32 |
+| 三个月没打开 | +20 |
+| 两个月没打开 | +10 |
+| 缓存 ≥ 5 GB / ≥ 1 GB / ≥ 500 MB | +25 / +15 / +7 |
+| 本体 ≥ 2 GB / ≥ 1 GB | +15 / +8 |
+| 数据 ≥ 1 GB 且是本体 3 倍以上 | +10 |
+
+≥ 50 分是「推荐卸载」，≥ 25 分是「可以考虑」。另外两条硬规则：
+
+- **系统软件永不推荐**，直接排除
+- **最近 30 天用过的**，除非缓存超过 5 GB，否则不推荐
+
+推荐只是建议。它不会自动勾选任何东西，也不会替你删任何东西——点「查看」进到卸载清单，勾什么还是你自己决定。
+
+### 「最后使用时间」是三路拼的
+
+macOS 没有「应用上次启动时间」的公开接口。实测全盘 338 个 `.app`：
+
+| 来源 | 实现 | 覆盖率 | 界面标注 |
+| --- | --- | --- | --- |
+| Spotlight | `NSMetadataItem` 读 `kMDItemLastUsedDate` | 28/338（8%） | 系统记录 |
+| 数据活跃 | 应用数据目录（容器/缓存/偏好/保存状态）最新 mtime，只看目录本身 + 第一层子项 | 约一半 | 数据活跃 |
+| 安装时间 | `.app` 本体 mtime | 全部 | 仅安装时间 |
+
+Safari、Music 这些系统应用的 `kMDItemLastUsedDate` 是 `null`——它们不走 LaunchServices 常规启动。所以必须有兜底。
+
+**标着「仅安装时间」的应用不参与「多久没用」的判断**，因为那个时间只说明什么时候装的。
+
+### 系统软件怎么认
+
+三个信号取并集：
+
+1. 解析符号链接后落在 `/System` 或 `/Library/Apple`。`/Applications/Safari.app` 其实是指向 `../System/Cryptexes/App/System/Applications/Safari.app` 的链接，只看字面路径会漏
+2. bundle id 以 `com.apple.` 开头
+3. Apple 平台签名：叶子证书 subject 是 `macOS Software Signing`（第三方是 `Developer ID Application: <公司> (<团队 ID>)`）
+
+签名判定走进程内 `SecStaticCodeCreateWithPath` + `SecCodeCopySigningInformation`，338 个应用 1.1 秒；换 `codesign` 子进程要 7.4 秒，没法用在刷新流程里。
+
+系统软件在侧边栏单独分组（默认折叠），详情页只展示占用，卸载按钮替换成「系统自带，不可卸载」。
+
+### 体积怎么拆
+
+| 字段 | 范围 |
+| --- | --- |
+| 本体 | `.app` 包 |
+| 数据 | `~/Library/Containers/<bid>`、`Application Support/<bid 或名字>`、`Preferences/<bid>.plist`、`Saved Application State`、`HTTPStorages`、`WebKit` |
+| 缓存 | `~/Library/Caches/<bid 或名字>`、Group Containers 里的 `Library/Caches` |
+
+沙盒容器内部的 `Data/Library/Caches` 算进「数据」，不重复计进「缓存」。
+
+刷新分两阶段：先算体积让界面立刻可用，再在后台补画像，每 25 个推一次进度。调试用 `--recommend` 可以把每个应用的画像和分数打出来。
+
 ## 关于沙盒容器（TCC 拦截）
 
 其他应用的沙盒数据（`~/Library/Containers/xxx`、`~/Library/Group Containers/xxx`）受 macOS 的 TCC 保护，普通应用去删会被内核拒绝，报「你没有访问该诊断报告的许可」。
@@ -151,13 +216,14 @@ v1.2 之前这里有个真 bug，也是三个最容易踩的坑：
 "dist/Mac软件管家.app/Contents/MacOS/MacApp" --selftest
 ```
 
-覆盖 19 条路径安全用例、通配符匹配、应用发现、扫描结果合法性、废纸篓移入与还原往返、彻底删除（含禁区拒绝、废纸篓无残留）、残留判定（精确/厂商父级/厂商兄弟/系统目录/模糊名称）、残留扫描结果合法性、本地文件校验与名称匹配、权限探测，共 117 项。
+覆盖 19 条路径安全用例、通配符匹配、应用发现、扫描结果合法性、废纸篓移入与还原往返、彻底删除（含禁区拒绝、废纸篓无残留）、残留判定（精确/厂商父级/厂商兄弟/系统目录/模糊名称）、残留扫描结果合法性、本地文件校验与名称匹配、权限探测、推荐引擎打分、占比与百分比格式、系统软件识别、应用画像与系统/自装分组，共 344 项。
 
 想人工核对扫描结果（看有没有误报）可以直接列出来：
 
 ```sh
 ... --orphans        # 只看高置信度
 ... --orphans all    # 连中置信度一起看
+... --recommend      # 每个应用的画像与推荐分数，调阈值用
 ```
 
 开发期自查用的隐藏模式：
@@ -175,6 +241,13 @@ v1.2 之前这里有个真 bug，也是三个最容易踩的坑：
 # 残留扫描界面（第二个参数传 orphan-all 可带出中置信度）
 ... --snapshot-orphan /tmp/orphan.png
 ... --snapshot-orphan /tmp/orphan.png orphan-all
+
+# 推荐页（recommend-demo 用合成数据，方便检查推荐行排版）
+... --snapshot-orphan /tmp/rec.png recommend
+... --snapshot-orphan /tmp/rec.png recommend-demo
+
+# 侧边栏默认折叠系统软件，这个参数展开它
+... --snapshot /tmp/ui.png 抖音 --expand-system
 ```
 
 注：`ImageRenderer` 不会给 `ScrollView` 里的内容排版，所以带列表的弹窗要用开窗截图（`--snapshot-orphan-sheet`）才看得全。
@@ -182,7 +255,9 @@ v1.2 之前这里有个真 bug，也是三个最容易踩的坑：
 ## 已知限制
 
 - 只构建了 arm64，Intel Mac 需要改 `build.sh` 里的 target
-- 只扫 `/Applications` 和 `~/Applications`，不动 `/System/Applications`
+- 「最后使用时间」是三路拼出来的，不是系统记录。标着「仅安装时间」的那批应用，其实不知道你到底用没用过，所以它们不参与推荐判断
+- 缓存只统计 `~/Library/Caches` 与 Group Containers 里的 `Library/Caches`。应用自己塞进 `Application Support` 的数据算「数据」，不算「缓存」
+- 系统软件按「`/System` 路径 + `com.apple.` 前缀 + Apple 平台签名」判定。极端情况：开发者用 Apple 证书签的第三方应用会被当成系统软件——不会被推荐卸载，但也删不掉
 - 本地文件只按名字匹配。中文名和英文目录名对不上时会漏，比如 123云盘（`com.mac123.mfy`）在 `~/Downloads/123pan` 的目录就匹配不到
 - 「残留」终究是猜的。Spotlight 没索引到的应用（比如刚从外置盘拔掉的）仍可能被误判，所以清理默认走废纸篓，别跳过
 - 没有代码签名证书，分发给别人会触发 Gatekeeper 提示，需要右键→打开；而且每次重新构建签名都会变，旧的 TCC 授权可能失效

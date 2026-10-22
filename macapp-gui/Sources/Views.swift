@@ -13,13 +13,16 @@ struct ContentView: View {
     @State private var showImporter = false
     @State private var showHistory = false
     @State private var dropTargeted = false
+    /// 系统软件默认折叠——它们删不掉，也没必要占着列表
+    @State private var showSystemApps = ProcessInfo.processInfo.arguments.contains("--expand-system")
 
     var body: some View {
         VStack(spacing: 0) {
             topBar
             Divider()
             HStack(spacing: 0) {
-                if store.mode == .apps {
+                switch store.mode {
+                case .apps:
                     sidebar
                         .frame(width: 268)
                         .background(Color(nsColor: .windowBackgroundColor))
@@ -27,7 +30,11 @@ struct ContentView: View {
                     detail
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color(nsColor: .windowBackgroundColor))
-                } else {
+                case .recommend:
+                    RecommendView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                case .orphans:
                     OrphanScanView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color(nsColor: .windowBackgroundColor))
@@ -94,11 +101,12 @@ struct ContentView: View {
                 set: { store.switchMode($0) }
             )) {
                 Text("应用").tag(ViewMode.apps)
+                Text("推荐").tag(ViewMode.recommend)
                 Text("残留扫描").tag(ViewMode.orphans)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 158)
+            .frame(width: 216)
 
             Text(store.status.isEmpty ? "共 \(store.apps.count) 个应用" : store.status)
                 .font(.system(size: 11))
@@ -160,16 +168,78 @@ struct ContentView: View {
                 .padding(.top, 10)
                 .padding(.bottom, 6)
             ScrollView {
-                LazyVStack(spacing: 1) {
-                    ForEach(store.filteredApps) { app in
-                        SidebarRow(app: app, selected: store.selectedID == app.id)
-                            .onTapGesture { store.select(app.id) }
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    if !store.userApps.isEmpty {
+                        groupHeader("自己装的", count: store.userApps.count, bytes: store.userTotalSize)
+                        ForEach(store.userApps) { app in
+                            row(for: app)
+                        }
+                    }
+                    if !store.systemApps.isEmpty {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.14)) { showSystemApps.toggle() }
+                        } label: {
+                            groupHeader(
+                                "系统软件", count: store.systemApps.count, bytes: store.systemTotalSize,
+                                chevron: showSystemApps ? "chevron.down" : "chevron.right"
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        if showSystemApps {
+                            ForEach(store.systemApps) { app in
+                                row(for: app)
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .padding(.vertical, 2)
+                .padding(.bottom, 8)
             }
         }
+    }
+
+    private func row(for app: AppInfo) -> some View {
+        SidebarRow(
+            app: app,
+            selected: store.selectedID == app.id,
+            share: app.share(of: store.totalFootprint),
+            maxShare: maxShare,
+            level: store.recommendation(for: app).level
+        )
+        .onTapGesture { store.select(app.id) }
+    }
+
+    /// 占比条按最大项归一化，否则小应用那条线根本看不见
+    private var maxShare: Double {
+        store.apps.map { $0.share(of: store.totalFootprint) }.max() ?? 0
+    }
+
+    private func groupHeader(
+        _ title: String, count: Int, bytes: Int64, chevron: String? = nil
+    ) -> some View {
+        HStack(spacing: 5) {
+            if let chevron {
+                Image(systemName: chevron)
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 8)
+            }
+            Text(title)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("\(count)")
+                .font(.system(size: 9.5))
+                .foregroundStyle(.tertiary)
+            Spacer(minLength: 0)
+            Text(ByteFormat.string(bytes))
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 10)
+        .padding(.bottom, 3)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -263,23 +333,53 @@ struct PermissionBanner: View {
 struct SidebarRow: View {
     let app: AppInfo
     let selected: Bool
+    /// 占全部应用总占用的比例
+    let share: Double
+    /// 最大项占比，用于把条形长度归一化
+    let maxShare: Double
+    let level: RecommendLevel
 
     var body: some View {
-        HStack(spacing: 9) {
-            Image(nsImage: app.icon)
-                .resizable()
-                .frame(width: 22, height: 22)
-            VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Image(nsImage: app.icon)
+                    .resizable()
+                    .frame(width: 22, height: 22)
                 Text(app.name)
                     .font(.system(size: 12.5))
                     .lineLimit(1)
-                if app.size > 0 {
-                    Text(ByteFormat.string(app.size))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
+                if app.isSystem {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 7))
+                        .foregroundStyle(.tertiary)
+                        .help("系统自带，删不掉")
+                }
+                Spacer(minLength: 0)
+                if !level.shortLabel.isEmpty {
+                    Text(level.shortLabel)
+                        .font(.system(size: 8.5, weight: .medium))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Self.tint(level).opacity(0.16), in: Capsule())
+                        .foregroundStyle(Self.tint(level))
                 }
             }
-            Spacer(minLength: 0)
+            HStack(spacing: 4) {
+                Text(ByteFormat.string(app.footprint))
+                    .font(.system(size: 10))
+                Text("·")
+                    .font(.system(size: 10))
+                Text(RecommendationEngine.usageText(app))
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(ByteFormat.percent(share))
+                    .font(.system(size: 9.5, design: .monospaced))
+            }
+            .foregroundStyle(.secondary)
+            .padding(.leading, 30)
+            ShareBar(value: maxShare > 0 ? share / maxShare : 0, tint: Self.tint(level))
+                .padding(.leading, 30)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
@@ -289,6 +389,293 @@ struct SidebarRow: View {
                 .fill(selected ? Color.accentColor.opacity(0.14) : Color.clear)
         )
         .contentShape(Rectangle())
+    }
+
+    static func tint(_ level: RecommendLevel) -> Color {
+        switch level {
+        case .strong: return .orange
+        case .consider: return .yellow
+        case .keep: return .accentColor
+        }
+    }
+}
+
+// MARK: - 占比条
+
+/// 细横条，用来比出「谁占得多」。值会被归一化到最大项，所以是相对长度不是绝对百分比。
+struct ShareBar: View {
+    let value: Double
+    var tint: Color = .accentColor
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.07))
+                Capsule()
+                    .fill(tint.opacity(0.75))
+                    .frame(width: max(1.5, geo.size.width * min(max(value, 0), 1)))
+            }
+        }
+        .frame(height: 2.5)
+    }
+}
+
+// MARK: - 体积构成小标签
+
+struct SizeChip: View {
+    let label: String
+    let bytes: Int64
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(ByteFormat.string(bytes))
+                .foregroundStyle(tint)
+        }
+        .font(.system(size: 9.5))
+        .padding(.horizontal, 4)
+        .padding(.vertical, 1)
+        .background(tint.opacity(0.10), in: Capsule())
+    }
+}
+
+// MARK: - 推荐卸载
+
+struct RecommendView: View {
+    @EnvironmentObject var store: Store
+
+    private var items: [(app: AppInfo, rec: Recommendation)] { store.recommendedApps }
+
+    private var maxShare: Double {
+        items.map { $0.app.share(of: store.totalFootprint) }.max() ?? 0
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("推荐卸载")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("\(items.count) 个")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if store.isBusy && store.apps.isEmpty {
+                    ProgressView().controlSize(.small)
+                }
+                if !items.isEmpty {
+                    Text("可释放 \(ByteFormat.string(store.recommendedBytes))")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(.orange)
+                    if store.diskCapacity > 0 {
+                        Text("占磁盘 \(ByteFormat.percent(Double(store.recommendedBytes) / Double(store.diskCapacity)))")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                    }
+                } else if !store.apps.isEmpty {
+                    Text("共 \(store.apps.count) 个应用 · \(ByteFormat.string(store.totalFootprint))")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text("按「多久没用」和「缓存大小」综合打分。推荐只是建议——不会自动勾选，也不会替你删任何东西。")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+            if store.recommendedCacheBytes > 0 {
+                Text("其中缓存 \(ByteFormat.string(store.recommendedCacheBytes))，这部分清掉不影响应用本身。")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if store.apps.isEmpty {
+            CenteredHint(icon: "sparkle.magnifyingglass", title: "正在分析…",
+                         subtitle: "读取使用记录和缓存占用，大约几秒")
+        } else if items.isEmpty {
+            // 没有推荐不代表没信息——至少告诉用户空间都去哪了
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "checkmark.seal")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("没有值得卸载的应用")
+                                .font(.system(size: 12.5, weight: .medium))
+                            Text("\(store.apps.count) 个应用里，最近都在用、缓存也不大。下面是占用最多的几个，供参考。")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.green.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+
+                    Text("占用排行")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+
+                    ForEach(store.apps.sorted { $0.footprint > $1.footprint }.prefix(10)) { app in
+                        TopFootprintRow(
+                            app: app,
+                            share: app.share(of: store.totalFootprint),
+                            maxShare: maxShareOfAll
+                        ) {
+                            store.inspectFromRecommend(app)
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 7) {
+                    ForEach(items, id: \.app.id) { item in
+                        RecommendRow(
+                            app: item.app,
+                            rec: item.rec,
+                            share: item.app.share(of: store.totalFootprint),
+                            maxShare: maxShare
+                        ) {
+                            store.inspectFromRecommend(item.app)
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+        }
+    }
+
+    private var maxShareOfAll: Double {
+        store.apps.map { $0.share(of: store.totalFootprint) }.max() ?? 0
+    }
+}
+
+/// 没有推荐时的占用排行行，不显示推荐等级
+struct TopFootprintRow: View {
+    let app: AppInfo
+    let share: Double
+    let maxShare: Double
+    let onInspect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(nsImage: app.icon)
+                .resizable()
+                .frame(width: 22, height: 22)
+            Text(app.name)
+                .font(.system(size: 12))
+                .lineLimit(1)
+            if app.isSystem {
+                Text("系统")
+                    .font(.system(size: 8.5))
+                    .padding(.horizontal, 3)
+                    .background(Color.secondary.opacity(0.14), in: Capsule())
+                    .foregroundStyle(.secondary)
+            }
+            ShareBar(value: maxShare > 0 ? share / maxShare : 0, tint: .accentColor)
+                .frame(width: 150)
+            Spacer(minLength: 6)
+            Text(ByteFormat.string(app.footprint))
+                .font(.system(size: 11, design: .monospaced))
+            Text(ByteFormat.percent(share))
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .frame(width: 46, alignment: .trailing)
+            Button("查看") { onInspect() }
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+struct RecommendRow: View {
+    let app: AppInfo
+    let rec: Recommendation
+    let share: Double
+    let maxShare: Double
+    let onInspect: () -> Void
+
+    private var tint: Color { SidebarRow.tint(rec.level) }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(nsImage: app.icon)
+                .resizable()
+                .frame(width: 32, height: 32)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(app.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    Text(rec.level.label)
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(tint.opacity(0.16), in: Capsule())
+                        .foregroundStyle(tint)
+                    Spacer(minLength: 8)
+                    Text(ByteFormat.string(app.footprint))
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                }
+                HStack(spacing: 5) {
+                    Text(RecommendationEngine.usageText(app))
+                        .foregroundStyle(rec.reasons.isEmpty ? .secondary : .secondary)
+                    Text(app.usageSource.label)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                    Text("占应用总占用 \(ByteFormat.percent(share))")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+                .font(.system(size: 10.5))
+                ShareBar(value: maxShare > 0 ? share / maxShare : 0, tint: tint)
+                    .frame(maxWidth: 320)
+                HStack(spacing: 6) {
+                    if app.cacheSize > 0 {
+                        SizeChip(label: "缓存", bytes: app.cacheSize, tint: .blue)
+                    }
+                    if app.dataSize > 0 {
+                        SizeChip(label: "数据", bytes: app.dataSize, tint: .purple)
+                    }
+                    Text(rec.reasons.joined(separator: " · "))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Button("查看") { onInspect() }
+                .controlSize(.small)
+                .help("打开卸载清单，自己确认要删哪些")
+        }
+        .padding(11)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .strokeBorder(tint.opacity(rec.level == .strong ? 0.28 : 0.0), lineWidth: 1)
+        )
     }
 }
 
@@ -356,19 +743,58 @@ struct PlanView: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                footprintLine
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 1) {
                 Text(ByteFormat.string(plan.totalSize))
                     .font(.system(size: 21, weight: .medium, design: .rounded))
-                Text("可清理")
+                Text(plan.app.isSystem ? "总占用" : "可清理")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
+                if store.totalFootprint > 0 {
+                    Text("占应用总占用 \(ByteFormat.percent(plan.app.share(of: store.totalFootprint)))")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// 体积构成 + 最后使用时间。四个新字段在这里一次性交代清楚，
+    /// 用户不用切到别的页面就能判断「这东西到底占在哪、还用不用」。
+    private var footprintLine: some View {
+        HStack(spacing: 6) {
+            if plan.app.isSystem {
+                Text("系统自带")
+                    .font(.system(size: 9.5))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.secondary.opacity(0.14), in: Capsule())
+                    .foregroundStyle(.secondary)
+            }
+            if plan.app.size > 0 {
+                SizeChip(label: "本体", bytes: plan.app.size, tint: .accentColor)
+            }
+            if plan.app.dataSize > 0 {
+                SizeChip(label: "数据", bytes: plan.app.dataSize, tint: .purple)
+            }
+            if plan.app.cacheSize > 0 {
+                SizeChip(label: "缓存", bytes: plan.app.cacheSize, tint: .blue)
+            }
+            Text("·")
+                .font(.system(size: 9.5))
+                .foregroundStyle(.tertiary)
+            Text(RecommendationEngine.usageText(plan.app))
+                .font(.system(size: 10))
+                .foregroundStyle(plan.app.usageSource.trustable ? .secondary : .tertiary)
+            Text(plan.app.usageSource.label)
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+        }
     }
 
     private var appRow: some View {
@@ -583,9 +1009,7 @@ struct PlanView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("已选 \(plan.selectedItems.count + 1 + plan.selectedLocalFiles.count) 项 · \(ByteFormat.string(plan.selectedSize))")
                     .font(.system(size: 12))
-                Text(plan.selectedLocalFiles.isEmpty
-                     ? "移入废纸篓可还原；彻底删除不可恢复"
-                     : "本地文件只会进废纸篓，不会被彻底删除")
+                Text(footerHint)
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }
@@ -594,32 +1018,49 @@ struct PlanView: View {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: plan.app.path)])
             }
             Button("重新扫描") { store.rescan() }
-            ActionButton(
-                title: "移入废纸篓",
-                systemImage: "trash",
-                tint: .primary,
-                background: Color.primary.opacity(0.06)
-            ) {
-                store.pendingUninstall = true
-            }
-            .help("可恢复，随时能从历史记录还原")
-            .disabled(store.isBusy)
-            .opacity(store.isBusy ? 0.45 : 1)
+            if plan.app.isSystem {
+                Label("系统自带，不可卸载", systemImage: "lock.shield")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+                    .help("系统软件受 SIP 保护，删不掉也不该删。这里只展示它占了多少空间。")
+            } else {
+                ActionButton(
+                    title: "移入废纸篓",
+                    systemImage: "trash",
+                    tint: .primary,
+                    background: Color.primary.opacity(0.06)
+                ) {
+                    store.pendingUninstall = true
+                }
+                .help("可恢复，随时能从历史记录还原")
+                .disabled(store.isBusy)
+                .opacity(store.isBusy ? 0.45 : 1)
 
-            ActionButton(
-                title: "彻底删除",
-                systemImage: "trash.slash",
-                tint: .red,
-                background: Color.red.opacity(0.12)
-            ) {
-                store.pendingPermanent = true
+                ActionButton(
+                    title: "彻底删除",
+                    systemImage: "trash.slash",
+                    tint: .red,
+                    background: Color.red.opacity(0.12)
+                ) {
+                    store.pendingPermanent = true
+                }
+                .help("直接删除，不进入废纸篓，无法恢复")
+                .disabled(store.isBusy)
+                .opacity(store.isBusy ? 0.45 : 1)
             }
-            .help("直接删除，不进入废纸篓，无法恢复")
-            .disabled(store.isBusy)
-            .opacity(store.isBusy ? 0.45 : 1)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
+    }
+
+    private var footerHint: String {
+        if plan.app.isSystem { return "系统软件受 SIP 保护，删不掉也不该删" }
+        return plan.selectedLocalFiles.isEmpty
+            ? "移入废纸篓可还原；彻底删除不可恢复"
+            : "本地文件只会进废纸篓，不会被彻底删除"
     }
 }
 
